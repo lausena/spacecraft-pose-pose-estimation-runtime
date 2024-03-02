@@ -1,21 +1,5 @@
 # Pose Estimation 
 
-#### Commands
-Prepare and test submissions:
-```
-$ make clean && make pack-final && make test-submission
-```
-
-```
-$ pip install -r runtime/environment.yml 
-```
-
-Run docker in interactive mode:
-
-`docker run -it spacecraftpose.azurecr.io/spacecraft-pose-pose-estimation
-/bin/bash`
-
-
 ## Local Setup
 
 Setup conda in wsl
@@ -25,7 +9,7 @@ bash Miniconda3-latest-Linux-x86_64.sh
 conda --version
 ```
 
-## Setup env with conda
+### Setup env with conda
 ```bash
 cd runtime
 conda env create -f environment.yml
@@ -42,3 +26,18 @@ Solution #1
 sudo apt-get install libgl1-mesa-glx
 ```
 
+
+## General Commands
+Prepare and test submissions:
+```
+$ make clean && make pack-final && make test-submission
+```
+
+```
+$ pip install -r runtime/environment.yml 
+```
+
+Run docker in interactive mode:
+
+`docker run -it spacecraftpose.azurecr.io/spacecraft-pose-pose-estimation
+/bin/bash`
