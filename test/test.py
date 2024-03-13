@@ -24,12 +24,12 @@ def load_images_and_train_model(count, model):
             y_col=["x", "y", "z", "qw", "qx", "qy", "qz"],
             target_size=(640, 512), # Downscale
             color_mode='grayscale',
-            class_mode="raw")
+            class_mode="raw",
+            batch_size=128)
         
-        model.fit(train_generator, epochs=2)
+        model.fit(train_generator, epochs=5)
 
     return model
-
 
 # x_train = dfX[:9]
 # y_train = dfY[:9]
@@ -44,8 +44,8 @@ def load_images_and_train_model(count, model):
 
 input = Input(shape=(640,512,1))
 conv = Conv2D(4, 4, activation='relu', padding="same", input_shape=[640, 512, 1])(input)
-#BatchNormalization()(conv)
-pooling = MaxPooling2D(2)(conv)
+norm = BatchNormalization()(conv)
+pooling = MaxPooling2D(2)(norm)
 conv2 = Conv2D(3, 2, activation='relu', padding='same')(pooling)
 flat = Flatten()(conv2)
 hidden = Dense(16, activation="relu")(flat)
@@ -61,5 +61,7 @@ qz = Dense(1)(hidden)
 model = Model(inputs=input, outputs=[x,y,z,qw,qx,qy,qz])
 
 model.summary()
-model.compile(loss="categorical_crossentropy", optimizer=tf.keras.optimizers.SGD(learning_rate=0.01, momentum=0.9))
-load_images_and_train_model(2, model)
+model.compile(loss="MSE", optimizer=tf.keras.optimizers.Nadam(learning_rate=0.01))
+load_images_and_train_model(50, model) # loading 50 chains trains on 5000 samples, takes ~130s per epoch (on GTX 1080ti)
+
+# TODO: add testing for model
