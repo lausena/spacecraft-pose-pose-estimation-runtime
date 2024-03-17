@@ -8,7 +8,6 @@ from loguru import logger
 import math
 from scipy.spatial.transform import Rotation
 
-
 INDEX_COLS = ["chain_id", "i"]
 PREDICTION_COLS = ["x", "y", "z", "qw", "qx", "qy", "qz"]
 REFERENCE_VALUES = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
@@ -80,14 +79,10 @@ def predict_chain(chain_dir: Path):
                     relative_points = np.float32([keypoint_base[m.queryIdx].pt for m in best_matches])
                     target_points = np.float32([keypoint_target[m.trainIdx].pt for m in best_matches])
 
-                    matched_points_base = np.float32([keypoint_base[m.queryIdx].pt + (0,) for m in best_matches]).reshape(-1, 1, 3)
-                    matched_points_img = np.float32([keypoint_target[m.trainIdx].pt + (0,) for m in best_matches]).reshape(-1, 1, 3)
+            
 
-                    from scipy.spatial.transform import Rotation
-                    # Compute homography
                     H, _ = cv2.findHomography(relative_points, target_points, cv2.RANSAC, 5.0)
-                    _, M, _ = cv2.estimateAffine3D(matched_points_base,matched_points_img)
-                    if H is not None and M is not None:
+                    if H is not None:
                         qw, qx, qy, qz = Rotation.from_matrix(H).as_quat()
                         x,y,z=np.random.rand(),np.random.rand(),np.random.rand()
                         predicted_values = np.array([x, y, z, qw, qx, qy, qz])
@@ -100,8 +95,6 @@ def predict_chain(chain_dir: Path):
             # essential_matrix, _ = cv2.findEssentialMat(relative_points2, target_points2)
             # _, R, t, _ =cv2.recoverPose(essential_matrix, relative_points2, target_points2)
             # pose = (R, t)
-
-
 
 
     
