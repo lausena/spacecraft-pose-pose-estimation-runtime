@@ -41,3 +41,21 @@ Run docker in interactive mode:
 
 `docker run -it spacecraftpose.azurecr.io/spacecraft-pose-pose-estimation
 /bin/bash`
+
+
+Scoring the run:
+```
+# python scripts/score.py <predicted path> <actual path>
+python scripts/score.py src/tmp/submission.csv data-local/train_labels.csv 
+```
+
+
+## Test Runs:
+On subset (random)
+```
+{
+  "mean_translation_error": 0.9980743806157799,
+  "mean_rotation_error": 1.8969958041324018,
+  "score": 2.8950701847481817
+}
+```

@@ -5,10 +5,20 @@ import cv2
 import numpy as np
 import pandas as pd
 from loguru import logger
+import math
+from scipy.spatial.transform import Rotation
+
 
 INDEX_COLS = ["chain_id", "i"]
 PREDICTION_COLS = ["x", "y", "z", "qw", "qx", "qy", "qz"]
 REFERENCE_VALUES = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+
+def rotationMatrixToQuaternion(R):
+    qw = np.sqrt(1 + R[0,0] + R[1,1] + R[2,2]) / 2
+    qx = (R[2,1] - R[1,2]) / (4 * qw)
+    qy = (R[0,2] - R[2,0]) / (4 * qw)
+    qz = (R[1,0] - R[0,1]) / (4 * qw)
+    return qw, qx, qy, qz
 
 
 def predict_chain(chain_dir: Path):
@@ -35,14 +45,92 @@ def predict_chain(chain_dir: Path):
         index=pd.Index(idxs, name="i"), columns=PREDICTION_COLS, dtype=float
     )
 
+    sift = None
+    base_image = None
+    keypoint_base = None
+    destination_base = None
+    bf_feature_matcher = None
+
     # make a prediction for each image
     for i, image_path in path_per_idx.items():
         if i == 0:
             predicted_values = REFERENCE_VALUES
+            sift = cv2.SIFT_create()
+            base_image = cv2.imread(str(image_path))
+            base_image_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
+            keypoint_base, destination_base = sift.detectAndCompute(base_image_gray, None)
+            bf_feature_matcher = cv2.BFMatcher()
         else:
-            _other_image = cv2.imread(str(image_path))
+            # _other_image = cv2.imread(str(image_path))
             # TODO: actually make predictions! we don't actually do anything useful here!
-            predicted_values = np.random.rand(len(PREDICTION_COLS))
+            # predicted_values = np.random.rand(len(PREDICTION_COLS))
+
+            target_image = cv2.imread(str(image_path))
+            target_image_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
+            keypoint_target, destination_target = sift.detectAndCompute(target_image_gray, None)
+            matches = []
+
+            if destination_target is None:
+                print('empty destiation target image....')
+                predicted_values = np.random.rand(len(PREDICTION_COLS))
+            else:
+                try:
+                    matches = bf_feature_matcher.knnMatch(destination_base, destination_target, k=2)
+                    best_matches = [m for m, _ in matches]
+                    relative_points = np.float32([keypoint_base[m.queryIdx].pt for m in best_matches])
+                    target_points = np.float32([keypoint_target[m.trainIdx].pt for m in best_matches])
+
+                    matched_points_base = np.float32([keypoint_base[m.queryIdx].pt + (0,) for m in best_matches]).reshape(-1, 1, 3)
+                    matched_points_img = np.float32([keypoint_target[m.trainIdx].pt + (0,) for m in best_matches]).reshape(-1, 1, 3)
+
+                    from scipy.spatial.transform import Rotation
+                    # Compute homography
+                    H, _ = cv2.findHomography(relative_points, target_points, cv2.RANSAC, 5.0)
+                    _, M, _ = cv2.estimateAffine3D(matched_points_base,matched_points_img)
+                    if H is not None and M is not None:
+                        qw, qx, qy, qz = Rotation.from_matrix(H).as_quat()
+                        x,y,z=np.random.rand(),np.random.rand(),np.random.rand()
+                        predicted_values = np.array([x, y, z, qw, qx, qy, qz])
+                    else:
+                        predicted_values = np.random.rand(len(PREDICTION_COLS))
+                except Exception as e:
+                     predicted_values = np.random.rand(len(PREDICTION_COLS))
+                     print(e)
+
+            # essential_matrix, _ = cv2.findEssentialMat(relative_points2, target_points2)
+            # _, R, t, _ =cv2.recoverPose(essential_matrix, relative_points2, target_points2)
+            # pose = (R, t)
+
+
+
+
+    
+            # matched_points_base = np.float32([keypoint_base[m.queryIdx].pt + (0,) for m in best_matches]).reshape(-1, 1, 3)
+            # matched_points_img = np.float32([keypoint_target[m.trainIdx].pt + (0,) for m in best_matches]).reshape(-1, 1, 3)
+            # M = None
+            # try:
+            #     _, M, _ = cv2.estimateAffine3D(matched_points_base, matched_points_img)
+            # except Exception as e:
+            #     print(e)
+
+            # if M is None:
+            #     predicted_values = np.random.rand(len(PREDICTION_COLS))
+            # else:
+
+            #     x = M[0, 3]
+            #     y = M[1, 3]
+            #     z = M[2, 3]
+
+            #     r_matrix = M[:3, :3] 
+
+            #     rotation_matrix_3x3 = np.eye(3)
+            #     rotation_matrix_3x3[:3, :3] = r_matrix
+            #     rotation = Rotation.from_matrix(rotation_matrix_3x3)
+
+            #     # Get quaternion representation
+            #     qw, qx, qy, qz = rotation.as_quat()
+            #     predicted_values = np.array([x, y, z, qw, qx, qy, qz])
+
         chain_df.loc[i] = predicted_values
 
     # double check we made predictions for each image
