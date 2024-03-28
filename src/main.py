@@ -7,14 +7,29 @@ import pandas as pd
 from loguru import logger
 import math
 from scipy.spatial.transform import Rotation
+import torch
+from PIL import Image
+from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+import transforms3d.quaternions as quat
+from scipy.spatial.transform import Rotation
+
 
 INDEX_COLS = ["chain_id", "i"]
 PREDICTION_COLS = ["x", "y", "z", "qw", "qx", "qy", "qz"]
 REFERENCE_VALUES = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
-CAMERA_MATRIX = np.array([[5.2125371e+03, 0.0000000e+00, 6.4000000e+02],
-                          [0.0000000e+00, 6.2550444e+03, 5.1200000e+02],
-                          [0.0000000e+00, 0.0000000e+00, 1.0000000e+00]])
+
+focal_length_x = 5212.5371
+focal_length_y = 6255.0444
+principal_point_x = 640.
+principal_point_y = 512.
+# camera intrinsics
+K = np.array([[focal_length_x, 0, principal_point_x],
+                          [0, focal_length_y,principal_point_y],
+                          [0, 0, 1]])
+P = np.array([[focal_length_x, 0, principal_point_x, 0],
+                          [0, focal_length_y,principal_point_y, 0],
+                          [0, 0, 1, 0]])
 
 def rotationMatrixToQuaternion(R):
     qw = np.sqrt(1 + R[0,0] + R[1,1] + R[2,2]) / 2
@@ -23,6 +38,155 @@ def rotationMatrixToQuaternion(R):
     qz = (R[1,0] - R[0,1]) / (4 * qw)
     return qw, qx, qy, qz
 
+
+def form_transf(R, t):
+        """
+        Makes a transformation matrix from the given rotation matrix and translation vector
+
+        Parameters
+        ----------
+        R (ndarray): The rotation matrix
+        t (list): The translation vector
+
+        Returns
+        -------
+        T (ndarray): The transformation matrix
+        """
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        return T
+
+def decomp_essential_mat(E, q1, q2):
+        """
+        Decompose the Essential matrix
+
+        Parameters
+        ----------
+        E (ndarray): Essential matrix
+        q1 (ndarray): The good keypoints matches position in i-1'th image
+        q2 (ndarray): The good keypoints matches position in i'th image
+
+        Returns
+        -------
+        right_pair (list): Contains the rotation matrix and translation vector
+        """
+        def sum_z_cal_relative_scale(R, t):
+            # Get the transformation matrix
+            T = form_transf(R, t)
+            # Make the projection matrix
+            P_cur = np.matmul(np.concatenate((K, np.zeros((3, 1))), axis=1), T)
+
+            # Triangulate the 3D points
+            hom_Q1 = cv2.triangulatePoints(P, P_cur, q1.T, q2.T)
+            # Also seen from cam 2
+            hom_Q2 = np.matmul(T, hom_Q1)
+
+            # Un-homogenize
+            uhom_Q1 = hom_Q1[:3, :] / hom_Q1[3, :]
+            uhom_Q2 = hom_Q2[:3, :] / hom_Q2[3, :]
+
+            # Find the number of points there has positive z coordinate in both cameras
+            sum_of_pos_z_Q1 = sum(uhom_Q1[2, :] > 0)
+            sum_of_pos_z_Q2 = sum(uhom_Q2[2, :] > 0)
+
+            # Form point pairs and calculate the relative scale
+            relative_scale = np.mean(np.linalg.norm(uhom_Q1.T[:-1] - uhom_Q1.T[1:], axis=-1)/
+                                     np.linalg.norm(uhom_Q2.T[:-1] - uhom_Q2.T[1:], axis=-1))
+            return sum_of_pos_z_Q1 + sum_of_pos_z_Q2, relative_scale
+
+        # Decompose the essential matrix
+        R1, R2, t = cv2.decomposeEssentialMat(E)
+        t = np.squeeze(t)
+
+        # Make a list of the different possible pairs
+        pairs = [[R1, t], [R1, -t], [R2, t], [R2, -t]]
+
+        # Check which solution there is the right one
+        z_sums = []
+        relative_scales = []
+        for R, t in pairs:
+            z_sum, scale = sum_z_cal_relative_scale(R, t)
+            z_sums.append(z_sum)
+            relative_scales.append(scale)
+
+        # Select the pair there has the most points with positive z coordinate
+        right_pair_idx = np.argmax(z_sums)
+        right_pair = pairs[right_pair_idx]
+        relative_scale = relative_scales[right_pair_idx]
+        R1, t = right_pair
+        print(f'Relative scale: {relative_scale}')
+        t = t * relative_scale
+        t
+
+        return [R1, t]
+
+
+MODEL_TYPE = "DPT_Large"
+MIDAS = torch.hub.load("intel-isl/MiDaS", MODEL_TYPE)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MIDAS.to(DEVICE)
+MIDAS.eval()
+
+def estimate_depth(image_path):
+    transform = Compose([
+        Resize(384),
+        ToTensor(),
+        # Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    img = Image.open(image_path).convert('RGB')
+    input_batch = transform(img).to(DEVICE).unsqueeze(0)
+
+    with torch.no_grad():
+        prediction = MIDAS(input_batch)
+        prediction = torch.nn.functional.interpolate(
+            prediction.unsqueeze(1),
+            size=img.size[::-1],
+            mode="bicubic",
+            align_corners=False,
+        ).squeeze()
+
+    output_depth = prediction.cpu().numpy()
+    return output_depth
+
+
+def extract_and_match_features(image1, image2):
+    sift = cv2.SIFT_create()
+    keypoints1, descriptors1 = sift.detectAndCompute(image1, None)
+    keypoints2, descriptors2 = sift.detectAndCompute(image2, None)
+
+    FLANN_INDEX_KDTREE = 1
+    index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+    matches = flann.knnMatch(descriptors1, descriptors2, k=2)
+
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.9 * n.distance:
+            good_matches.append(m)
+
+    points1 = np.zeros((len(good_matches), 2), dtype=np.float32)
+    points2 = np.zeros((len(good_matches), 2), dtype=np.float32)
+
+    for i, match in enumerate(good_matches):
+        points1[i, :] = keypoints1[match.queryIdx].pt
+        points2[i, :] = keypoints2[match.trainIdx].pt
+
+    return points1, points2
+
+def derive_3d_points(matched_points_2d, depth_map):
+    points_3d = []
+    for x, y in matched_points_2d:
+        depth = depth_map[int(y), int(x)]
+        points_3d.append([x, y, depth])
+    return np.array(points_3d)
+
+def estimate_pose(points_3d, points_2d, camera_matrix):
+    _, rvec, tvec = cv2.solvePnP(points_3d, points_2d, camera_matrix, None)
+    return rvec, tvec
 
 def predict_chain(chain_dir: Path):
     logger.debug(f"making predictions for {chain_dir}")
@@ -48,87 +212,48 @@ def predict_chain(chain_dir: Path):
         index=pd.Index(idxs, name="i"), columns=PREDICTION_COLS, dtype=float
     )
 
-    sift = None
-    base_image = None
-    keypoint_base = None
-    destination_base = None
-    bf_feature_matcher = None
-
     # make a prediction for each image
     for i, image_path in path_per_idx.items():
         if i == 0:
             predicted_values = REFERENCE_VALUES
-            # sift = cv2.SIFT_create()
             sift = cv2.SIFT_create()
-            orb = cv2.ORB_create()
-
-            base_image = cv2.imread(str(image_path))
-            base_image_gray = cv2.cvtColor(base_image, cv2.COLOR_BGR2GRAY)
-            keypoint_base, destination_base = sift.detectAndCompute(base_image_gray, None)
-            orb_kp1, orb_des1 = orb.detectAndCompute(base_image_gray, None)
-            bf_feature_matcher = cv2.BFMatcher()
+            reference_image = cv2.imread(str(image_path))
+            reference_image_path = image_path
+            depth_map_reference = estimate_depth(reference_image_path)
+            # keypoints1, descriptors1 = sift.detectAndCompute(reference_image, None)
         else:
-            target_image = cv2.imread(str(image_path))
-            target_image_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
-            keypoint_target, destination_target = sift.detectAndCompute(target_image_gray, None)
-            orb_kp2, orb_des2 = orb.detectAndCompute(target_image_gray, None)
-            matches = []
+            try:
+                target_image = cv2.imread(str(image_path))
+                # Apply feature matching
+                matched_points_reference, matched_points_target = extract_and_match_features(reference_image, target_image)
+                # Depth Estimation
+                depth_map_target = estimate_depth(reference_image_path)
 
-            if destination_target is None or orb_des2 is None:
-                print('empty destiation target image....')
+                matched_points_3d_target = derive_3d_points(matched_points_target, depth_map_target)
+                # matched_points_3d_reference = derive_3d_points(matched_points_reference, depth_map_reference)
+
+                # Estimate 3D Position and Orientation
+                focal_length_x = 5212.5371
+                focal_length_y = 6255.0444
+                # focal_length_x = 1000
+                # focal_length_y = 1000
+                principal_point_x = target_image.shape[1] / 2
+                principal_point_y = target_image.shape[0] / 2
+                K = np.array([[focal_length_x, 0, principal_point_x],
+                                        [0, focal_length_y,principal_point_y],
+                                        [0, 0, 1]])
+                
+                rvec, translation_vector = estimate_pose(matched_points_3d_target, matched_points_reference, K)
+
+                rotation = Rotation.from_rotvec(rvec.flatten())
+                quaternion = rotation.as_quat()
+                qw, qx, qy, qz = quaternion
+                x, y, z = 0,0,0
+                # x, y, z = translation_vector
+                predicted_values = np.array([x, y, z, qw, qx, qy, qz])                
+            except Exception as e:
                 predicted_values = np.random.rand(len(PREDICTION_COLS))
-            else:
-                try:
-                    # SIFT LOGIC
-                    matches = bf_feature_matcher.knnMatch(destination_base, destination_target, k=2)
-                    best_matches = [m for m, _ in matches]
-                    relative_points = np.float32([keypoint_base[m.queryIdx].pt for m in best_matches])
-                    target_points = np.float32([keypoint_target[m.trainIdx].pt for m in best_matches])
-                    H, _ = cv2.findHomography(relative_points, target_points, cv2.RANSAC, 5.0)
-
-                    # ORB LOGIC
-                            # Match keypoints between the two images
-                    orb_matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
-                    orb_matches = orb_matcher.match(orb_des1, orb_des2, None)
-                    
-                    # Extract matched keypoints
-                    points1 = np.float32([orb_kp1[m.queryIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
-                    points2 = np.float32([orb_kp2[m.trainIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
-
-                    E, _ = cv2.findEssentialMat(points1, points2, CAMERA_MATRIX)
-                    _, R, t, _ = cv2.recoverPose(E, points1, points2, CAMERA_MATRIX)
-                    # translation = np.append(t[:2], 0) * 2000
-
-
-                    if H is not None:
-                        inf_mask = np.isinf(H)
-                        nan_mask = np.isnan(H)
-                        if np.any(inf_mask) or np.any(nan_mask):
-                            predicted_values = np.random.rand(len(PREDICTION_COLS))
-                        else:
-                            qw, qx, qy, qz = Rotation.from_matrix(H).as_quat()
-                            x,y,z = t.ravel()
-                            predicted_values = np.array([x, y, z, qw, qx, qy, qz])
-
-                            # h,w,_ = base_image.shape
-                            # pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
-                            # dst = cv2.perspectiveTransform(pts,H)
-                            # print()
-
-                            # print(f'Trans: {[x,y,z]}')
-                            # print(f'Quat: {[round(x, 4) for x in [qw, qx, qy, qz]]}')
-                            # print()
-                            # for first (1)
-                            # translation 
-                            # 2.21703339,23.38332176,12.38890553
-                            # quaternion
-                            # 0.99002814,-0.0722533,0.07088085,-0.09797749
-
-                    else:
-                        predicted_values = np.random.rand(len(PREDICTION_COLS))
-                except Exception as e:
-                     predicted_values = np.random.rand(len(PREDICTION_COLS))
-                     print(e)
+                print(e)
                     
         chain_df.loc[i] = predicted_values
 
