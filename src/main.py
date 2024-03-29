@@ -9,15 +9,14 @@ import math
 from scipy.spatial.transform import Rotation
 import torch
 from PIL import Image
-from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+from torchvision.transforms import Compose, Resize, ToTensor, Normalize, RandomHorizontalFlip, RandomRotation
 import transforms3d.quaternions as quat
 from scipy.spatial.transform import Rotation
-
+import time
 
 INDEX_COLS = ["chain_id", "i"]
 PREDICTION_COLS = ["x", "y", "z", "qw", "qx", "qy", "qz"]
 REFERENCE_VALUES = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-
 
 focal_length_x = 5212.5371
 focal_length_y = 6255.0444
@@ -31,111 +30,35 @@ P = np.array([[focal_length_x, 0, principal_point_x, 0],
                           [0, focal_length_y,principal_point_y, 0],
                           [0, 0, 1, 0]])
 
-def rotationMatrixToQuaternion(R):
-    qw = np.sqrt(1 + R[0,0] + R[1,1] + R[2,2]) / 2
-    qx = (R[2,1] - R[1,2]) / (4 * qw)
-    qy = (R[0,2] - R[2,0]) / (4 * qw)
-    qz = (R[1,0] - R[0,1]) / (4 * qw)
-    return qw, qx, qy, qz
 
 
-def form_transf(R, t):
-        """
-        Makes a transformation matrix from the given rotation matrix and translation vector
 
-        Parameters
-        ----------
-        R (ndarray): The rotation matrix
-        t (list): The translation vector
-
-        Returns
-        -------
-        T (ndarray): The transformation matrix
-        """
-        T = np.eye(4, dtype=np.float64)
-        T[:3, :3] = R
-        T[:3, 3] = t
-        return T
-
-def decomp_essential_mat(E, q1, q2):
-        """
-        Decompose the Essential matrix
-
-        Parameters
-        ----------
-        E (ndarray): Essential matrix
-        q1 (ndarray): The good keypoints matches position in i-1'th image
-        q2 (ndarray): The good keypoints matches position in i'th image
-
-        Returns
-        -------
-        right_pair (list): Contains the rotation matrix and translation vector
-        """
-        def sum_z_cal_relative_scale(R, t):
-            # Get the transformation matrix
-            T = form_transf(R, t)
-            # Make the projection matrix
-            P_cur = np.matmul(np.concatenate((K, np.zeros((3, 1))), axis=1), T)
-
-            # Triangulate the 3D points
-            hom_Q1 = cv2.triangulatePoints(P, P_cur, q1.T, q2.T)
-            # Also seen from cam 2
-            hom_Q2 = np.matmul(T, hom_Q1)
-
-            # Un-homogenize
-            uhom_Q1 = hom_Q1[:3, :] / hom_Q1[3, :]
-            uhom_Q2 = hom_Q2[:3, :] / hom_Q2[3, :]
-
-            # Find the number of points there has positive z coordinate in both cameras
-            sum_of_pos_z_Q1 = sum(uhom_Q1[2, :] > 0)
-            sum_of_pos_z_Q2 = sum(uhom_Q2[2, :] > 0)
-
-            # Form point pairs and calculate the relative scale
-            relative_scale = np.mean(np.linalg.norm(uhom_Q1.T[:-1] - uhom_Q1.T[1:], axis=-1)/
-                                     np.linalg.norm(uhom_Q2.T[:-1] - uhom_Q2.T[1:], axis=-1))
-            return sum_of_pos_z_Q1 + sum_of_pos_z_Q2, relative_scale
-
-        # Decompose the essential matrix
-        R1, R2, t = cv2.decomposeEssentialMat(E)
-        t = np.squeeze(t)
-
-        # Make a list of the different possible pairs
-        pairs = [[R1, t], [R1, -t], [R2, t], [R2, -t]]
-
-        # Check which solution there is the right one
-        z_sums = []
-        relative_scales = []
-        for R, t in pairs:
-            z_sum, scale = sum_z_cal_relative_scale(R, t)
-            z_sums.append(z_sum)
-            relative_scales.append(scale)
-
-        # Select the pair there has the most points with positive z coordinate
-        right_pair_idx = np.argmax(z_sums)
-        right_pair = pairs[right_pair_idx]
-        relative_scale = relative_scales[right_pair_idx]
-        R1, t = right_pair
-        print(f'Relative scale: {relative_scale}')
-        t = t * relative_scale
-        t
-
-        return [R1, t]
-
-
-MODEL_TYPE = "DPT_Large"
+# MODEL_TYPE = "DPT_Large"
+MODEL_TYPE = "MiDaS_small"
 MIDAS = torch.hub.load("intel-isl/MiDaS", MODEL_TYPE)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = "cpu" # no gpu available for this assignment
 MIDAS.to(DEVICE)
 MIDAS.eval()
 
+def estimate_mean_std(image):
+    img_tensor = ToTensor()(image)
+    mean = torch.mean(img_tensor, dim=(1, 2))
+    std = torch.std(img_tensor, dim=(1, 2))
+    return mean, std
+
 def estimate_depth(image_path):
+    img = Image.open(image_path).convert('RGB')
+    mean, std = estimate_mean_std(img)
+
     transform = Compose([
+        RandomHorizontalFlip(),  # Randomly flip the image horizontally
+        RandomRotation(degrees=15),
         Resize(384),
         ToTensor(),
-        # Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        Normalize(mean=mean, std=std)
     ])
 
-    img = Image.open(image_path).convert('RGB')
     input_batch = transform(img).to(DEVICE).unsqueeze(0)
 
     with torch.no_grad():
@@ -149,6 +72,45 @@ def estimate_depth(image_path):
 
     output_depth = prediction.cpu().numpy()
     return output_depth
+
+
+def process_depth_images(image_paths): 
+    batches = []
+    for i, image_path in image_paths.items():
+        img = Image.open(image_path).convert('RGB')
+        mean, std = estimate_mean_std(img)
+
+        transform = Compose([
+            RandomHorizontalFlip(),  # Randomly flip the image horizontally
+            RandomRotation(degrees=15),
+            Resize(384),
+            ToTensor(),
+            Normalize(mean=mean, std=std)
+        ])
+
+        batches.append(transform(img).to(DEVICE).unsqueeze(0))
+        
+    input_batches = torch.stack(batches, dim=0)
+    output_depths = []
+
+    # start_time = time.time()
+    for i, input_batch in enumerate(input_batches):
+        with torch.no_grad():
+            prediction = MIDAS(input_batch)
+            prediction = torch.nn.functional.interpolate(
+                prediction.unsqueeze(1),
+                size=img.size[::-1],
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze()
+
+        output_depths.append(prediction.cpu().numpy())
+
+
+    # end_time = time.time()
+    # execution_time = end_time - start_time
+    # print("Execution time: {:.2f} seconds".format(execution_time))
+    return output_depths
 
 
 def extract_and_match_features(image1, image2):
@@ -212,41 +174,41 @@ def predict_chain(chain_dir: Path):
         index=pd.Index(idxs, name="i"), columns=PREDICTION_COLS, dtype=float
     )
 
+    depth_maps = process_depth_images(path_per_idx)
+
     # make a prediction for each image
+    start_time = time.time()
     for i, image_path in path_per_idx.items():
         if i == 0:
             predicted_values = REFERENCE_VALUES
-            sift = cv2.SIFT_create()
             reference_image = cv2.imread(str(image_path))
-            reference_image_path = image_path
-            depth_map_reference = estimate_depth(reference_image_path)
-            # keypoints1, descriptors1 = sift.detectAndCompute(reference_image, None)
         else:
             try:
+                # target_image_path = image_path
                 target_image = cv2.imread(str(image_path))
                 # Apply feature matching
                 matched_points_reference, matched_points_target = extract_and_match_features(reference_image, target_image)
                 # Depth Estimation
-                depth_map_target = estimate_depth(reference_image_path)
-
+                depth_map_target = depth_maps[i - 1]
+                # (384,)
                 matched_points_3d_target = derive_3d_points(matched_points_target, depth_map_target)
-                # matched_points_3d_reference = derive_3d_points(matched_points_reference, depth_map_reference)
 
                 # Estimate 3D Position and Orientation
                 focal_length_x = 5212.5371
                 focal_length_y = 6255.0444
                 # focal_length_x = 1000
                 # focal_length_y = 1000
-                principal_point_x = target_image.shape[1] / 2
-                principal_point_y = target_image.shape[0] / 2
+                principal_point_x = 640
+                principal_point_y = 512
+                # principal_point_x = target_image.shape[1] / 2
+                # principal_point_y = target_image.shape[0] / 2
                 K = np.array([[focal_length_x, 0, principal_point_x],
                                         [0, focal_length_y,principal_point_y],
                                         [0, 0, 1]])
                 
                 rvec, translation_vector = estimate_pose(matched_points_3d_target, matched_points_reference, K)
-
-                rotation = Rotation.from_rotvec(rvec.flatten())
-                quaternion = rotation.as_quat()
+                rotation_matrix, _ = cv2.Rodrigues(rvec)
+                quaternion = Rotation.from_matrix(rotation_matrix).as_quat()
                 qw, qx, qy, qz = quaternion
                 x, y, z = 0,0,0
                 # x, y, z = translation_vector
@@ -256,6 +218,10 @@ def predict_chain(chain_dir: Path):
                 print(e)
                     
         chain_df.loc[i] = predicted_values
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print("Execution time: {:.2f} seconds".format(execution_time))
 
     # double check we made predictions for each image
     assert (
@@ -296,14 +262,15 @@ def main(data_dir, output_path):
 
     image_dir = data_dir / "images"
     chain_ids = submission_format_df.index.get_level_values(0).unique()
-    for chain_id in chain_ids:
-        logger.info(f"Processing chain: {chain_id}")
+    for i, chain_id in enumerate(chain_ids):
+        logger.info(f"Processing chain: {chain_id}. Total {i}/{len(chain_ids)}")
         chain_dir = image_dir / chain_id
         assert chain_dir.exists(), f"Chain directory does not exist: {chain_dir}"
         chain_df = predict_chain(chain_dir)
         submission_df.loc[chain_id] = chain_df.values
 
     submission_df.to_csv(output_path, index=True)
+    # 270 seconds
 
 
 if __name__ == "__main__":
