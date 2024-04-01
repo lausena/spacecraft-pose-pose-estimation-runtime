@@ -23,6 +23,24 @@ def rotationMatrixToQuaternion(R):
     qz = (R[1,0] - R[0,1]) / (4 * qw)
     return qw, qx, qy, qz
 
+def Get5PointSolution(img1, img2):
+    sift = cv.SIFT_create()
+    keypoints1, descriptor1 = sift.detectAndCompute(img1, None)
+    keypoints2, descriptor2 = sift.detectAndCompute(img2, None)
+    bf_feature_matcher = cv.BFMatcher()
+    matches = bf_feature_matcher.knnMatch(descriptor1,descriptor2,k=2)
+    goodMatches = []
+    for m,n in matches:
+        if m.distance < 0.75*n.distance:
+            goodMatches.append([m])
+
+    points1 = np.float32([keypoints1[m[0].queryIdx].pt for m in goodMatches]).reshape(-1, 1, 2)
+    points2 = np.float32([keypoints2[m[0].trainIdx].pt for m in goodMatches]).reshape(-1, 1, 2)
+
+
+    E, _ = cv.findEssentialMat(points1, points2, CAMERA_MATRIX)
+    _, R, t, _ = cv.recoverPose(E, points1, points2, CAMERA_MATRIX)
+    return (R, t)
 
 def predict_chain(chain_dir: Path):
     logger.debug(f"making predictions for {chain_dir}")
@@ -79,53 +97,7 @@ def predict_chain(chain_dir: Path):
                 predicted_values = np.random.rand(len(PREDICTION_COLS))
             else:
                 try:
-                    # SIFT LOGIC
-                    matches = bf_feature_matcher.knnMatch(destination_base, destination_target, k=2)
-                    best_matches = [m for m, _ in matches]
-                    relative_points = np.float32([keypoint_base[m.queryIdx].pt for m in best_matches])
-                    target_points = np.float32([keypoint_target[m.trainIdx].pt for m in best_matches])
-                    H, _ = cv2.findHomography(relative_points, target_points, cv2.RANSAC, 5.0)
-
-                    # ORB LOGIC
-                            # Match keypoints between the two images
-                    orb_matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
-                    orb_matches = orb_matcher.match(orb_des1, orb_des2, None)
-                    
-                    # Extract matched keypoints
-                    points1 = np.float32([orb_kp1[m.queryIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
-                    points2 = np.float32([orb_kp2[m.trainIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
-
-                    E, _ = cv2.findEssentialMat(points1, points2, CAMERA_MATRIX)
-                    _, R, t, _ = cv2.recoverPose(E, points1, points2, CAMERA_MATRIX)
-                    # translation = np.append(t[:2], 0) * 2000
-
-
-                    if H is not None:
-                        inf_mask = np.isinf(H)
-                        nan_mask = np.isnan(H)
-                        if np.any(inf_mask) or np.any(nan_mask):
-                            predicted_values = np.random.rand(len(PREDICTION_COLS))
-                        else:
-                            qw, qx, qy, qz = Rotation.from_matrix(H).as_quat()
-                            x,y,z = t.ravel()
-                            predicted_values = np.array([x, y, z, qw, qx, qy, qz])
-
-                            # h,w,_ = base_image.shape
-                            # pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
-                            # dst = cv2.perspectiveTransform(pts,H)
-                            # print()
-
-                            # print(f'Trans: {[x,y,z]}')
-                            # print(f'Quat: {[round(x, 4) for x in [qw, qx, qy, qz]]}')
-                            # print()
-                            # for first (1)
-                            # translation 
-                            # 2.21703339,23.38332176,12.38890553
-                            # quaternion
-                            # 0.99002814,-0.0722533,0.07088085,-0.09797749
-
-                    else:
-                        predicted_values = np.random.rand(len(PREDICTION_COLS))
+                    R, t = Get5PointSolution(base_image, )
                 except Exception as e:
                      predicted_values = np.random.rand(len(PREDICTION_COLS))
                      print(e)
