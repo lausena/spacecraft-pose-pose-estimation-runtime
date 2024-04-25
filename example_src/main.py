@@ -5,13 +5,14 @@ import cv2
 import numpy as np
 import pandas as pd
 from loguru import logger
+import keras
+import tensorflow as tf
 
 INDEX_COLS = ["chain_id", "i"]
 PREDICTION_COLS = ["x", "y", "z", "qw", "qx", "qy", "qz"]
 REFERENCE_VALUES = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
-
-def predict_chain(chain_dir: Path):
+def predict_chain(chain_dir: Path, model):
     logger.debug(f"making predictions for {chain_dir}")
     chain_id = chain_dir.name
     image_paths = list(sorted(chain_dir.glob("*.png")))
@@ -26,7 +27,9 @@ def predict_chain(chain_dir: Path):
     # pick out the reference image
     try:
         reference_img_path = path_per_idx[0]
-        _reference_img = cv2.imread(str(reference_img_path))
+        #_reference_img = cv2.imread(str(reference_img_path))
+        _reference_img = tf.image.resize(tf.image.decode_png(tf.io.read_file(str(reference_img_path)), channels=3), (512,640))
+        #_reference_img = keras.utils.load_img(str(reference_img_path), target_size=(512,640))
     except KeyError:
         raise ValueError(f"Could not find reference image for chain {chain_id}")
 
@@ -40,9 +43,13 @@ def predict_chain(chain_dir: Path):
         if i == 0:
             predicted_values = REFERENCE_VALUES
         else:
-            _other_image = cv2.imread(str(image_path))
-            # TODO: actually make predictions! we don't actually do anything useful here!
-            predicted_values = np.random.rand(len(PREDICTION_COLS))
+            #_other_image = cv2.imread(str(image_path))
+            _other_image = tf.image.resize(tf.image.decode_png(tf.io.read_file(str(image_path)), channels=3), (512,640))
+            #_other_image = keras.utils.load_img(str(image_path), target_size=(512,640))
+            predicted_values = model.predict([np.asarray([_reference_img]), np.asarray([_other_image])])
+            predicted_values_df = pd.DataFrame(predicted_values, columns=["x", "y", "z", "qw", "qx", "qy", "qz"])
+            predicted_values_df[["qw", "qx", "qy", "qz"]] = [0,0,0,0]
+            predicted_values = np.asarray(predicted_values_df)
         chain_df.loc[i] = predicted_values
 
     # double check we made predictions for each image
@@ -82,14 +89,21 @@ def main(data_dir, output_path):
     # copy over the submission format so we can overwrite placeholders with predictions
     submission_df = submission_format_df.copy()
 
+    # load trained model
+    model = keras.models.load_model('./test_model-logcosh-16x3-3e-00001-larger-kernels.keras')
+
     image_dir = data_dir / "images"
     chain_ids = submission_format_df.index.get_level_values(0).unique()
+    i = 0
     for chain_id in chain_ids:
         logger.info(f"Processing chain: {chain_id}")
         chain_dir = image_dir / chain_id
         assert chain_dir.exists(), f"Chain directory does not exist: {chain_dir}"
-        chain_df = predict_chain(chain_dir)
+        chain_df = predict_chain(chain_dir, model)
         submission_df.loc[chain_id] = chain_df.values
+        i = i + 1
+        if i > 10: 
+            break
 
     submission_df.to_csv(output_path, index=True)
 
