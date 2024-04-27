@@ -88,45 +88,46 @@ def predict_chain(chain_dir: Path):
 
                     # ORB LOGIC
                             # Match keypoints between the two images
-                    orb_matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
-                    orb_matches = orb_matcher.match(orb_des1, orb_des2, None)
+                    # orb_matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
+                    # orb_matches = orb_matcher.match(orb_des1, orb_des2, None)
                     
-                    # Extract matched keypoints
-                    points1 = np.float32([orb_kp1[m.queryIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
-                    points2 = np.float32([orb_kp2[m.trainIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
+                    # # Extract matched keypoints
+                    # points1 = np.float32([orb_kp1[m.queryIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
+                    # points2 = np.float32([orb_kp2[m.trainIdx].pt for m in orb_matches]).reshape(-1, 1, 2)
 
-                    E, _ = cv2.findEssentialMat(points1, points2, CAMERA_MATRIX)
-                    _, R, t, _ = cv2.recoverPose(E, points1, points2, CAMERA_MATRIX)
-                    # translation = np.append(t[:2], 0) * 2000
+                    # E, _ = cv2.findEssentialMat(points1, points2, CAMERA_MATRIX)
+                    # _, R, t, _ = cv2.recoverPose(E, points1, points2, CAMERA_MATRIX)
 
+                    # _, rotation_matrix, translation_vector, _ = cv2.decomposeHomographyMat(H, CAMERA_MATRIX)
+
+
+                    # E, _ = cv2.findEssentialMat(relative_points, target_points, CAMERA_MATRIX)
+                    # retval, R, t, mask = cv2.recoverPose(E, relative_points, target_points)
 
                     if H is not None:
                         inf_mask = np.isinf(H)
                         nan_mask = np.isnan(H)
                         if np.any(inf_mask) or np.any(nan_mask):
+                            logger.warning("Invalid H values!!")
                             predicted_values = np.random.rand(len(PREDICTION_COLS))
                         else:
+                            # if rotation_matrix is not None:
+                            #     inf_mask_rot = np.isinf(rotation_matrix)
+                            #     nan_mask_rot = np.isnan(rotation_matrix)
+                            #     if np.any(inf_mask_rot) or np.any(nan_mask_rot): 
+                            #         logger.warning("Invalid rotation matrix values!!")
+                            #         predicted_values = np.random.rand(len(PREDICTION_COLS))
+                            #     else:
                             qw, qx, qy, qz = Rotation.from_matrix(H).as_quat()
-                            x,y,z = t.ravel()
+                            # trans_flat = translation_vector[0].flatten()
+                            # x,y,z = trans_flat[0],trans_flat[1],0
+                            x,y,z = 0,0,0
                             predicted_values = np.array([x, y, z, qw, qx, qy, qz])
-
-                            # h,w,_ = base_image.shape
-                            # pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
-                            # dst = cv2.perspectiveTransform(pts,H)
-                            # print()
-
-                            # print(f'Trans: {[x,y,z]}')
-                            # print(f'Quat: {[round(x, 4) for x in [qw, qx, qy, qz]]}')
-                            # print()
-                            # for first (1)
-                            # translation 
-                            # 2.21703339,23.38332176,12.38890553
-                            # quaternion
-                            # 0.99002814,-0.0722533,0.07088085,-0.09797749
-
                     else:
+                        logger.warning("Invalid H!!")
                         predicted_values = np.random.rand(len(PREDICTION_COLS))
                 except Exception as e:
+                     logger.warning("Invalid processing of homography!!")
                      predicted_values = np.random.rand(len(PREDICTION_COLS))
                      print(e)
                     
