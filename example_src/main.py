@@ -12,7 +12,7 @@ INDEX_COLS = ["chain_id", "i"]
 PREDICTION_COLS = ["x", "y", "z", "qw", "qx", "qy", "qz"]
 REFERENCE_VALUES = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
-def predict_chain(chain_dir: Path, model):
+def predict_chain(chain_dir: Path, model, range_df):
     logger.debug(f"making predictions for {chain_dir}")
     chain_id = chain_dir.name
     image_paths = list(sorted(chain_dir.glob("*.png")))
@@ -46,7 +46,8 @@ def predict_chain(chain_dir: Path, model):
             #_other_image = cv2.imread(str(image_path))
             _other_image = tf.image.resize(tf.image.decode_png(tf.io.read_file(str(image_path)), channels=3), (512,640))
             #_other_image = keras.utils.load_img(str(image_path), target_size=(512,640))
-            predicted_values = model.predict([np.asarray([_reference_img]), np.asarray([_other_image])])
+            range = range_df.loc[(chain_id, i), :]
+            predicted_values = model.predict([np.asarray([_reference_img]), np.asarray([_other_image]), np.asarray(range)])
             predicted_values_df = pd.DataFrame(predicted_values, columns=["x", "y", "z", "qw", "qx", "qy", "qz"])
             predicted_values_df[["qw", "qx", "qy", "qz"]] = [0,0,0,0]
             predicted_values = np.asarray(predicted_values_df)
@@ -89,21 +90,23 @@ def main(data_dir, output_path):
     # copy over the submission format so we can overwrite placeholders with predictions
     submission_df = submission_format_df.copy()
 
+    range_path = data_dir / "range.csv"
+    range_df = pd.read_csv(range_path, index_col=INDEX_COLS)
+    range_df = range_df.ffill()
+    range_df = range_df.fillna(range_df.mean()) # ensure all nan vals are filled
+
     # load trained model
-    model = keras.models.load_model('./test_model-logcosh-16x3-3e-00001-larger-kernels.keras')
+    model = keras.models.load_model('./test_model-logcosh-c1x2-16x3-3e-000005-larger-kernels-7500-depth.keras')
 
     image_dir = data_dir / "images"
     chain_ids = submission_format_df.index.get_level_values(0).unique()
-    i = 0
+
     for chain_id in chain_ids:
         logger.info(f"Processing chain: {chain_id}")
         chain_dir = image_dir / chain_id
         assert chain_dir.exists(), f"Chain directory does not exist: {chain_dir}"
-        chain_df = predict_chain(chain_dir, model)
+        chain_df = predict_chain(chain_dir, model, range_df)
         submission_df.loc[chain_id] = chain_df.values
-        i = i + 1
-        if i > 10: 
-            break
 
     submission_df.to_csv(output_path, index=True)
 
