@@ -6,6 +6,7 @@
 #     f.close()
 #     return
 
+import os
 
 def create_output_filepath(image_path, chain_id, output_dir, label=""):
     

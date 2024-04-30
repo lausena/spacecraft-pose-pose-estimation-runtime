@@ -73,8 +73,8 @@ class CustomDataGenerator(tf.keras.utils.Sequence):
         all_range = self.data_frame['Range']
         ranges = all_range[idx * self.batch_size:(idx + 1) * self.batch_size]
 
-        #feature_list = [np.asarray(base_image), np.asarray(image), ranges]
-        feature_list = [np.asarray(base_image), np.asarray(image)]
+        # feature_list = [np.asarray(base_image), np.asarray(image), ranges]
+        feature_list = [np.asarray(base_image), np.asarray(image), np.asarray(ranges)]
 
         # Create Y Labels
         y = self.labels[idx * self.batch_size:(idx + 1) * self.batch_size]

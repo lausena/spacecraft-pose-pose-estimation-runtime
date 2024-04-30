@@ -27,12 +27,9 @@ def train_translational_model(dataframe_dict):
 	model_pos = build_CNN_Model()
 
 	# Create Custom Data Generator
-	data_generator = CustomDataGenerator(feature_dataframe, translation_dataframe, batch_size=100)
+	data_generator = CustomDataGenerator(feature_dataframe, translation_dataframe, batch_size=10)
 
 	X, y = data_generator[0]
-
-	print(X)
-	print(y)
 
 	# Train Model
 	with tf.device('/GPU:0'):
@@ -42,14 +39,24 @@ def build_CNN_Model():
 
 	# Input Shapes
 	conv_input_shape = (512, 640, 3)
-	range_input_shape = (1, 1)
+	range_input_shape = 1
 
-	# Define Model
 
+	# Learning Rate Scheduler
+	lr_schedule = keras.optimizers.schedules.ExponentialDecay(
+		initial_learning_rate=0.001,
+		decay_steps=10000,
+		decay_rate=0.9)
+	
+	# Set Optimizer
+	adam_optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
+
+
+	# Define Layers
 	## Inputs
 	conv_branch_input_Base = Input(shape=conv_input_shape)
 	conv_branch_input_Img = Input(shape=conv_input_shape)
-	# range_input = Input(shape=range_input_shape)                                        ### Uncomment and add to concat when working
+	range_input = Input(shape=range_input_shape)
 
 	## Convolutional Branches
 	conv_branch = create_conv_branch_pos(conv_input_shape)
@@ -60,9 +67,9 @@ def build_CNN_Model():
 	conv_concat = keras.layers.concatenate([processed_conv_A, processed_conv_B])
 	conv_flatten_layer = Flatten()(conv_concat)
 
-	# concatenated_layer = keras.layers.concatenate([conv_flatten_layer, range_input])   ### Add Range Here when working
+	concatenated_layer = keras.layers.concatenate([conv_flatten_layer, range_input])   ### Add Range Here when working
 
-	dropout_layer1 = Dropout(0.25)(conv_flatten_layer)
+	dropout_layer1 = Dropout(0.25)(concatenated_layer)
 	dense_layer1 = Dense(16)(dropout_layer1)
 
 	dropout_layer2 = Dropout(0.25)(dense_layer1)
@@ -73,9 +80,9 @@ def build_CNN_Model():
 
 	output = Dense(3)(x1)
 
-	## Create Model
-	model_pos = Model(inputs=[conv_branch_input_Base, conv_branch_input_Img], outputs=output)
-	model_pos.compile(optimizer=Adam(learning_rate=0.0001), loss="log_cosh")
+	# Create Model
+	model_pos = Model(inputs=[conv_branch_input_Base, conv_branch_input_Img, range_input], outputs=output)
+	model_pos.compile(optimizer=adam_optimizer, loss="log_cosh")
 	model_pos.summary()
 
 	return model_pos
